@@ -1,9 +1,15 @@
 name: SMS Worker
 
 on:
-  workflow_dispatch: # 👈 allows manual triggering from GitHub UI
   schedule:
-    - cron: '*/15 * * * *' # 👈 runs every 15 minutes
+    # Every 6 minutes between 10:30 PM and 11:54 AM ACST (Adelaide time), converted to UTC
+    - cron: '30-59/6 13 * * *'  # 10:30 PM–10:59 PM ACST → 13:30–13:59 UTC
+    - cron: '0-59/6 14-23 * * *' # 11:00 PM–8:59 AM ACST → 14:00–23:59 UTC
+    - cron: '0-54/6 0 * * *'     # 9:00 AM–9:54 AM ACST → 00:00–00:54 UTC
+    - cron: '0-54/6 1 * * *'     # 10:00 AM–10:54 AM ACST → 01:00–01:54 UTC
+    - cron: '0-54/6 2 * * *'     # 11:00 AM–11:54 AM ACST → 02:00–02:54 UTC
+
+  workflow_dispatch:  # Manual trigger
 
 jobs:
   send-sms:
