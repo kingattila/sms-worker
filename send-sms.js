@@ -5,7 +5,7 @@ const twilio = require('twilio');
 // Init Supabase and Twilio clients
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_KEY // ✅ Updated here
+  process.env.SUPABASE_KEY
 );
 
 const twilioClient = twilio(
@@ -120,26 +120,25 @@ async function notifyCustomers() {
         }
 
       } else {
-        let totalEstimatedWait = 0;
+        // Handle 'Any barber' logic
+        const unassignedAhead = queue.slice(0, i).filter(e => !e.requested_barber_id);
+        const isFirstUnassigned = unassignedAhead.length === 0;
 
+        let totalEstimatedWait = 0;
         for (let j = 0; j < i; j++) {
           const aheadEntry = queue[j];
           const barberId = aheadEntry.requested_barber_id;
-
-          if (barberId && barberMap[barberId]) {
-            totalEstimatedWait += barberMap[barberId].average_cut_time || 15;
-          } else {
-            const defaultTime = Object.values(barberMap)[0]?.average_cut_time || 15;
-            totalEstimatedWait += defaultTime;
-          }
+          const cutTime = barberId && barberMap[barberId]
+            ? barberMap[barberId].average_cut_time || 15
+            : Object.values(barberMap)[0]?.average_cut_time || 15;
+          totalEstimatedWait += cutTime;
         }
 
-        const isFirstInQueue = i === 0;
-        const shouldNotify = isFirstInQueue || totalEstimatedWait <= notifyThreshold;
+        const shouldNotify = isFirstUnassigned || totalEstimatedWait <= notifyThreshold;
 
         if (shouldNotify) {
-          const reason = isFirstInQueue
-            ? 'First in queue'
+          const reason = isFirstUnassigned
+            ? 'First unassigned entry'
             : `Estimated wait time (${totalEstimatedWait} min) <= threshold (${notifyThreshold} min)`;
 
           console.log(`📢 Notifying "${entry.customer_name}" (${entry.phone_number}) — Reason: ${reason}`);
@@ -153,7 +152,7 @@ async function notifyCustomers() {
   }
 }
 
-// Run and handle exit codes for Render
+// Run and handle exit codes for Render cron job
 (async () => {
   try {
     await notifyCustomers();
