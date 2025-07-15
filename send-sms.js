@@ -111,7 +111,8 @@ async function notifyCustomers() {
     }
 
     const activeBarberCount = barbersByShop[shopId]?.length || 0;
-    const notifyPosition = Math.max(activeBarberCount - 1, 0);
+    // Notify position is 0 for 1-2 barbers, 1 for 3 barbers, 2 for 4 barbers, etc.
+    const notifyPosition = activeBarberCount <= 2 ? 0 : activeBarberCount - 1;
     console.log(`📋 Processing shop ${shopId}: ${activeBarberCount} active barbers, notifyPosition=${notifyPosition + 1}`);
 
     // Group queue by specific barber and "Any Barber"
