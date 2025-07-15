@@ -34,7 +34,7 @@ async function notifyAndMark(entry, message) {
   if (smsSent) {
     const { error: updateError } = await supabase
       .from('queue_entries')
-      .update({ notified: true })
+      .update({ notified: true }) // 🔁 No longer marking as 'served'
       .eq('id', entry.id);
 
     if (updateError) {
@@ -103,12 +103,14 @@ async function notifyCustomers() {
     const shop = shopMap[shopId];
     const notifyThreshold = shop?.notify_threshold || 10;
 
-    for (let i = 0; i < queue.length; i++) {
-      const entry = queue[i];
-
+    for (const entry of queue) {
       if (entry.requested_barber_id) {
-        const isNextForBarber = !queue.slice(0, i).some(
-          (e) => e.requested_barber_id === entry.requested_barber_id
+        // Specific barber logic
+        const isNextForBarber = !queue.some(
+          (e) =>
+            e.id !== entry.id &&
+            e.requested_barber_id === entry.requested_barber_id &&
+            e.joined_at < entry.joined_at
         );
 
         if (isNextForBarber) {
@@ -118,15 +120,15 @@ async function notifyCustomers() {
         } else {
           console.log(`⏳ Not notifying "${entry.customer_name}" — still waiting for their barber.`);
         }
-
       } else {
-        // Handle 'Any barber' logic
-        const unassignedAhead = queue.slice(0, i).filter(e => !e.requested_barber_id);
-        const isFirstUnassigned = unassignedAhead.length === 0;
+        // "Any barber" logic — new fix
+        const unassignedQueue = queue.filter(e => !e.requested_barber_id);
+        const myIndex = unassignedQueue.findIndex(e => e.id === entry.id);
+        const isFirstUnassigned = myIndex === 0;
 
         let totalEstimatedWait = 0;
-        for (let j = 0; j < i; j++) {
-          const aheadEntry = queue[j];
+        for (let j = 0; j < myIndex; j++) {
+          const aheadEntry = unassignedQueue[j];
           const barberId = aheadEntry.requested_barber_id;
           const cutTime = barberId && barberMap[barberId]
             ? barberMap[barberId].average_cut_time || 15
