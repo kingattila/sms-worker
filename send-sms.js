@@ -36,46 +36,53 @@ async function notifyAndMark(entry, message) {
       .eq('id', entry.id);
     if (error) {
       console.error(`❌ Could not mark entry ${entry.id} as notified:`, error.message);
+      return false;
     }
-    return !error; // Return true if update was successful
+    console.log(`✅ Marked entry ${entry.id} as notified.`);
+    return true;
   }
   return false;
 }
 
 async function notifyCustomers() {
+  console.log('📋 Starting notifyCustomers at', new Date().toISOString());
+
   // Fetch waiting queue entries
   const { data: entries, error: queueError } = await supabase
     .from('queue_entries')
-    .select('*')
+    .select('id, customer_name, status, joined_at, requested_barber_id, shop_id, phone_number, notified')
     .eq('status', 'waiting')
     .eq('notified', false)
     .order('joined_at', { ascending: true });
 
-  if (queueError || !entries) {
-    console.error('❌ Error fetching queue:', queueError?.message);
+  if (queueError) {
+    console.error('❌ Error fetching queue:', queueError.message);
     return;
   }
+  console.log(`📋 Found ${entries?.length || 0} waiting queue entries:`, entries);
 
   // Fetch active barbers
   const { data: barbers, error: barberError } = await supabase
     .from('barbers')
-    .select('id, shop_id')
+    .select('id, shop_id, status')
     .eq('status', 'active');
 
-  if (barberError || !barbers) {
-    console.error('❌ Error fetching barbers:', barberError?.message);
+  if (barberError) {
+    console.error('❌ Error fetching barbers:', barberError.message);
     return;
   }
+  console.log(`📋 Found ${barbers?.length || 0} active barbers:`, barbers);
 
-  // Fetch shop configurations
+  // Fetch shops (only need id to validate shop_id)
   const { data: shops, error: shopError } = await supabase
     .from('barbershops')
-    .select('id, notify_threshold');
+    .select('id');
 
-  if (shopError || !shops) {
-    console.error('❌ Error fetching shops:', shopError?.message);
+  if (shopError) {
+    console.error('❌ Error fetching shops:', shopError.message);
     return;
   }
+  console.log(`📋 Found ${shops?.length || 0} shops:`, shops);
 
   // Group barbers by shop
   const barbersByShop = {};
@@ -83,6 +90,7 @@ async function notifyCustomers() {
     if (!barbersByShop[barber.shop_id]) barbersByShop[barber.shop_id] = [];
     barbersByShop[barber.shop_id].push(barber.id);
   });
+  console.log('📋 Barbers grouped by shop:', barbersByShop);
 
   // Group queue entries by shop
   const queuesByShop = {};
@@ -91,19 +99,20 @@ async function notifyCustomers() {
     if (!queuesByShop[shopId]) queuesByShop[shopId] = [];
     queuesByShop[shopId].push(entry);
   });
+  console.log('📋 Queue entries grouped by shop:', queuesByShop);
 
   // Process each shop's queue
   for (const shopId in queuesByShop) {
     const queue = queuesByShop[shopId];
     const shop = shops.find(s => s.id === shopId);
     if (!shop) {
-      console.error(`❌ Shop ${shopId} not found.`);
+      console.error(`❌ Shop ${shopId} not found for queue entries.`);
       continue;
     }
 
     const activeBarberCount = barbersByShop[shopId]?.length || 0;
-    // Use shop-specific threshold or default to activeBarberCount - 1
-    const notifyThreshold = shop.notify_threshold !== null ? shop.notify_threshold : Math.max(activeBarberCount - 1, 0);
+    const notifyPosition = Math.max(activeBarberCount - 1, 0);
+    console.log(`📋 Processing shop ${shopId}: ${activeBarberCount} active barbers, notifyPosition=${notifyPosition + 1}`);
 
     // Group queue by specific barber and "Any Barber"
     const queuesByBarber = {};
@@ -112,25 +121,34 @@ async function notifyCustomers() {
       if (!queuesByBarber[barberKey]) queuesByBarber[barberKey] = [];
       queuesByBarber[barberKey].push(entry);
     });
+    console.log(`📋 Queues for shop ${shopId} grouped by barber:`, queuesByBarber);
 
     // Process specific barber queues
-    for (const barberId in queuesByBarber) {
-      const barberQueue = queuesByBarber[barberId];
-      if (barberId === 'any') {
-        // Notify customers for "Any Barber" at the correct position
-        for (let i = 0; i < barberQueue.length; i++) {
-          const entry = barberQueue[i];
-          if (i === notifyThreshold && !entry.notified) {
-            console.log(`📢 Notifying ${entry.customer_name} (Any Barber) — position ${i + 1} with ${activeBarberCount} active barbers.`);
+    for (const barberKey in queuesByBarber) {
+      const barberQueue = queuesByBarber[barberKey];
+      if (barberKey === 'any') {
+        // Notify customer at notifyPosition for "Any Barber"
+        if (barberQueue.length > notifyPosition) {
+          const entry = barberQueue[notifyPosition];
+          if (!entry.notified) {
+            console.log(`📢 Notifying ${entry.customer_name} (Any Barber) — position ${notifyPosition + 1} with ${activeBarberCount} active barbers.`);
             await notifyAndMark(entry, `You're almost up at Fade Lab – get ready!`);
+          } else {
+            console.log(`📋 Skipping ${entry.customer_name} (Any Barber) — already notified at position ${notifyPosition + 1}.`);
           }
+        } else {
+          console.log(`📋 No notification for "Any Barber" in shop ${shopId}: queue length (${barberQueue.length}) <= notifyPosition (${notifyPosition + 1}).`);
         }
       } else {
-        // Notify first customer in line for a specific barber
+        // Notify first customer for specific barber
         const entry = barberQueue[0];
         if (entry && !entry.notified) {
-          console.log(`📢 Notifying ${entry.customer_name} for barber ${barberId}.`);
+          console.log(`📢 Notifying ${entry.customer_name} for barber ${barberKey} — first in line.`);
           await notifyAndMark(entry, `You're next in line for your barber at Fade Lab!`);
+        } else if (entry) {
+          console.log(`📋 Skipping ${entry.customer_name} for barber ${barberKey} — already notified.`);
+        } else {
+          console.log(`📋 No customers in queue for barber ${barberKey} in shop ${shopId}.`);
         }
       }
     }
@@ -139,6 +157,7 @@ async function notifyCustomers() {
 
 (async () => {
   try {
+    console.log('🚀 Starting cron job at', new Date().toISOString());
     await notifyCustomers();
     console.log('✅ Notification process completed.');
     process.exit(0);
