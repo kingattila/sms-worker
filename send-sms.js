@@ -47,7 +47,20 @@ async function notifyAndMark(entry, message) {
 async function notifyCustomers() {
   console.log('📋 Starting notifyCustomers at', new Date().toISOString());
 
-  // Fetch waiting queue entries
+  // Fetch all waiting queue entries (for context)
+  const { data: allWaitingEntries, error: allQueueError } = await supabase
+    .from('queue_entries')
+    .select('id, customer_name, status, joined_at, requested_barber_id, shop_id, phone_number, notified')
+    .eq('status', 'waiting')
+    .order('joined_at', { ascending: true });
+
+  if (allQueueError) {
+    console.error('❌ Error fetching all queue entries:', allQueueError.message);
+    return;
+  }
+  console.log(`📋 Found ${allWaitingEntries?.length || 0} total waiting queue entries:`, allWaitingEntries);
+
+  // Fetch waiting queue entries (notified = false)
   const { data: entries, error: queueError } = await supabase
     .from('queue_entries')
     .select('id, customer_name, status, joined_at, requested_barber_id, shop_id, phone_number, notified')
@@ -56,10 +69,24 @@ async function notifyCustomers() {
     .order('joined_at', { ascending: true });
 
   if (queueError) {
-    console.error('❌ Error fetching queue:', queueError.message);
+    console.error('❌ Error fetching queue (not notified):', queueError.message);
     return;
   }
-  console.log(`📋 Found ${entries?.length || 0} waiting queue entries:`, entries);
+  console.log(`📋 Found ${entries?.length || 0} waiting queue entries (not notified):`, entries);
+
+  // Fetch waiting queue entries that are notified but not served
+  const { data: notifiedEntries, error: notifiedError } = await supabase
+    .from('queue_entries')
+    .select('id, customer_name, status, joined_at, requested_barber_id, shop_id, phone_number, notified')
+    .eq('status', 'waiting')
+    .eq('notified', true)
+    .order('joined_at', { ascending: true });
+
+  if (notifiedError) {
+    console.error('❌ Error fetching notified queue entries:', notifiedError.message);
+    return;
+  }
+  console.log(`📋 Found ${notifiedEntries?.length || 0} waiting queue entries (notified):`, notifiedEntries);
 
   // Fetch active barbers
   const { data: barbers, error: barberError } = await supabase
@@ -73,7 +100,7 @@ async function notifyCustomers() {
   }
   console.log(`📋 Found ${barbers?.length || 0} active barbers:`, barbers);
 
-  // Fetch shops (only need id to validate shop_id)
+  // Fetch shops
   const { data: shops, error: shopError } = await supabase
     .from('barbershops')
     .select('id');
@@ -92,14 +119,23 @@ async function notifyCustomers() {
   });
   console.log('📋 Barbers grouped by shop:', barbersByShop);
 
-  // Group queue entries by shop
+  // Group queue entries by shop (not notified)
   const queuesByShop = {};
   entries.forEach(entry => {
     const shopId = entry.shop_id;
     if (!queuesByShop[shopId]) queuesByShop[shopId] = [];
     queuesByShop[shopId].push(entry);
   });
-  console.log('📋 Queue entries grouped by shop:', queuesByShop);
+  console.log('📋 Queue entries grouped by shop (not notified):', queuesByShop);
+
+  // Group notified but waiting entries by shop
+  const notifiedQueuesByShop = {};
+  notifiedEntries.forEach(entry => {
+    const shopId = entry.shop_id;
+    if (!notifiedQueuesByShop[shopId]) notifiedQueuesByShop[shopId] = [];
+    notifiedQueuesByShop[shopId].push(entry);
+  });
+  console.log('📋 Notified but waiting queue entries grouped by shop:', notifiedQueuesByShop);
 
   // Process each shop's queue
   for (const shopId in queuesByShop) {
@@ -111,9 +147,12 @@ async function notifyCustomers() {
     }
 
     const activeBarberCount = barbersByShop[shopId]?.length || 0;
-    // Notify position is 0 for 1-2 barbers, 1 for 3 barbers, 2 for 4 barbers, etc.
     const notifyPosition = activeBarberCount <= 2 ? 0 : activeBarberCount - 1;
     console.log(`📋 Processing shop ${shopId}: ${activeBarberCount} active barbers, notifyPosition=${notifyPosition + 1}`);
+
+    // Check for notified but waiting "Any Barber" customers
+    const notifiedWaiting = notifiedQueuesByShop[shopId]?.filter(e => e.requested_barber_id === null) || [];
+    console.log(`📋 Found ${notifiedWaiting.length} notified but waiting "Any Barber" customers in shop ${shopId}:`, notifiedWaiting);
 
     // Group queue by specific barber and "Any Barber"
     const queuesByBarber = {};
@@ -122,18 +161,23 @@ async function notifyCustomers() {
       if (!queuesByBarber[barberKey]) queuesByBarber[barberKey] = [];
       queuesByBarber[barberKey].push(entry);
     });
-    console.log(`📋 Queues for shop ${shopId} grouped by barber:`, queuesByBarber);
+    console.log(`📋 Queues for shop ${shopId} grouped by barber (not notified):`, queuesByBarber);
 
     // Process specific barber queues
     for (const barberKey in queuesByBarber) {
       const barberQueue = queuesByBarber[barberKey];
       if (barberKey === 'any') {
+        // Skip if there are notified but waiting "Any Barber" customers for one barber
+        if (activeBarberCount === 1 && notifiedWaiting.length > 0) {
+          console.log(`📋 No notification for "Any Barber" in shop ${shopId}: ${notifiedWaiting.length} notified but waiting customers exist (single barber).`);
+          continue;
+        }
         // Notify customer at notifyPosition for "Any Barber"
         if (barberQueue.length > notifyPosition) {
           const entry = barberQueue[notifyPosition];
           if (!entry.notified) {
             console.log(`📢 Notifying ${entry.customer_name} (Any Barber) — position ${notifyPosition + 1} with ${activeBarberCount} active barbers.`);
-            await notifyAndMark(entry, `You're almost up at Fade Lab – get ready!`);
+            await notifyAndMark(entry, `You're #${notifyPosition + 1} in line at Fade Lab – get ready!`);
           } else {
             console.log(`📋 Skipping ${entry.customer_name} (Any Barber) — already notified at position ${notifyPosition + 1}.`);
           }
