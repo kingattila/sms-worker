@@ -1,8 +1,8 @@
+// send-sms.js
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
 const twilio = require('twilio');
 
-// Init Supabase and Twilio clients
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
@@ -15,7 +15,7 @@ const twilioClient = twilio(
 
 async function sendSMS(to, message) {
   try {
-    const result = await twilioClient.messages.create({
+    await twilioClient.messages.create({
       body: message,
       from: process.env.TWILIO_PHONE_NUMBER,
       to,
@@ -30,131 +30,72 @@ async function sendSMS(to, message) {
 
 async function notifyAndMark(entry, message) {
   const smsSent = await sendSMS(entry.phone_number, message);
-
   if (smsSent) {
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from('queue_entries')
-      .update({ notified: true }) // 🔁 No longer marking as 'served'
+      .update({ notified: true })
       .eq('id', entry.id);
-
-    if (updateError) {
-      console.error(`❌ Failed to mark entry ${entry.id} as notified:`, updateError.message);
-    } else {
-      console.log(`✅ Marked entry ${entry.id} as notified.`);
-    }
+    if (error) console.error(`❌ Could not mark entry as notified:`, error.message);
   }
 }
 
 async function notifyCustomers() {
-  const { data: entries, error } = await supabase
+  const { data: entries, error: queueError } = await supabase
     .from('queue_entries')
     .select('*')
     .eq('status', 'waiting')
     .eq('notified', false)
     .order('joined_at', { ascending: true });
 
-  if (error) {
-    console.error('❌ Error fetching queue:', error.message);
-    return;
-  }
+  if (queueError || !entries) return console.error('❌ Error fetching queue:', queueError?.message);
 
-  if (!entries || entries.length === 0) {
-    console.log('✅ No entries to process.');
-    return;
-  }
-
-  const { data: barbers, error: barbersError } = await supabase
+  const { data: barbers, error: barberError } = await supabase
     .from('barbers')
-    .select('id, average_cut_time');
+    .select('id')
+    .eq('status', 'active');
 
-  if (barbersError) {
-    console.error('❌ Error fetching barbers:', barbersError.message);
-    return;
-  }
+  if (barberError || !barbers) return console.error('❌ Error fetching barbers:', barberError?.message);
 
-  const barberMap = {};
-  barbers.forEach((barber) => {
-    barberMap[barber.id] = barber;
-  });
-
-  const { data: barbershops, error: shopsError } = await supabase
+  const activeBarberCount = barbers.length;
+  const { data: shops, error: shopError } = await supabase
     .from('barbershops')
     .select('id, notify_threshold');
 
-  if (shopsError) {
-    console.error('❌ Error fetching barbershops:', shopsError.message);
-    return;
-  }
+  if (shopError || !shops) return console.error('❌ Error fetching shops:', shopError?.message);
 
-  const shopMap = {};
-  barbershops.forEach((shop) => {
-    shopMap[shop.id] = shop;
-  });
+  const shopMap = Object.fromEntries(shops.map(s => [s.id, s]));
+  const queuesByShop = {};
 
-  const shops = {};
   for (const entry of entries) {
     const shopId = entry.shop_id;
-    if (!shops[shopId]) shops[shopId] = [];
-    shops[shopId].push(entry);
+    if (!queuesByShop[shopId]) queuesByShop[shopId] = [];
+    queuesByShop[shopId].push(entry);
   }
 
-  for (const shopId in shops) {
-    const queue = shops[shopId];
+  for (const shopId in queuesByShop) {
+    const queue = queuesByShop[shopId];
     const shop = shopMap[shopId];
-    const notifyThreshold = shop?.notify_threshold || 10;
 
-    for (const entry of queue) {
+    for (let i = 0; i < queue.length; i++) {
+      const entry = queue[i];
       if (entry.requested_barber_id) {
-        // Specific barber logic
-        const isNextForBarber = !queue.some(
-          (e) =>
-            e.id !== entry.id &&
-            e.requested_barber_id === entry.requested_barber_id &&
-            e.joined_at < entry.joined_at
-        );
-
-        if (isNextForBarber) {
-          console.log(`📢 Notifying "${entry.customer_name}" (${entry.phone_number}) — Reason: Next for their barber`);
-          const msg = `You're next in line for your barber at Fade Lab!`;
-          await notifyAndMark(entry, msg);
-        } else {
-          console.log(`⏳ Not notifying "${entry.customer_name}" — still waiting for their barber.`);
+        const isNext = !queue.slice(0, i).some(e => e.requested_barber_id === entry.requested_barber_id);
+        if (isNext) {
+          console.log(`📢 Notifying ${entry.customer_name} for specific barber.`);
+          await notifyAndMark(entry, `You're next in line for your barber at Fade Lab!`);
         }
       } else {
-        // "Any barber" logic — new fix
-        const unassignedQueue = queue.filter(e => !e.requested_barber_id);
-        const myIndex = unassignedQueue.findIndex(e => e.id === entry.id);
-        const isFirstUnassigned = myIndex === 0;
-
-        let totalEstimatedWait = 0;
-        for (let j = 0; j < myIndex; j++) {
-          const aheadEntry = unassignedQueue[j];
-          const barberId = aheadEntry.requested_barber_id;
-          const cutTime = barberId && barberMap[barberId]
-            ? barberMap[barberId].average_cut_time || 15
-            : Object.values(barberMap)[0]?.average_cut_time || 15;
-          totalEstimatedWait += cutTime;
-        }
-
-        const shouldNotify = isFirstUnassigned || totalEstimatedWait <= notifyThreshold;
-
-        if (shouldNotify) {
-          const reason = isFirstUnassigned
-            ? 'First unassigned entry'
-            : `Estimated wait time (${totalEstimatedWait} min) <= threshold (${notifyThreshold} min)`;
-
-          console.log(`📢 Notifying "${entry.customer_name}" (${entry.phone_number}) — Reason: ${reason}`);
-          const msg = `You're almost up at Fade Lab – get ready!`;
-          await notifyAndMark(entry, msg);
-        } else {
-          console.log(`⏳ Not notifying "${entry.customer_name}" (${entry.phone_number}) — Estimated wait: ${totalEstimatedWait} min`);
+        const unassignedAhead = queue.slice(0, i).filter(e => !e.requested_barber_id);
+        const notifyIndex = Math.max(activeBarberCount - 1, 0); // notify if you're index X where X = activeBarbers - 1
+        if (unassignedAhead.length === notifyIndex) {
+          console.log(`📢 Notifying ${entry.customer_name} (Any barber) — position ${i} with ${activeBarberCount} active barbers.`);
+          await notifyAndMark(entry, `You're almost up at Fade Lab – get ready!`);
         }
       }
     }
   }
 }
 
-// Run and handle exit codes for Render cron job
 (async () => {
   try {
     await notifyCustomers();
