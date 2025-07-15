@@ -5,7 +5,7 @@ const twilio = require('twilio');
 // Init Supabase and Twilio clients
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_KEY // ✅ Updated here
 );
 
 const twilioClient = twilio(
